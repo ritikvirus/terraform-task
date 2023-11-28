@@ -1,0 +1,164 @@
+:type: service
+:name: ECS Service
+:description: Deploy an ECS service with zero-downtime, rolling deployment, IAM Role, auto scaling, and more.
+:icon: /_docs/ecs-service-icon.png
+:category: docker-services
+:cloud: aws
+:tags: docker, orchestration, ecs, containers
+:license: gruntwork
+:built-with: terraform, python
+
+// AsciiDoc TOC settings
+:toc:
+:toc-placement!:
+:toc-title:
+
+// GitHub specific settings. See https://gist.github.com/dcode/0cfbf2699a1fe9b46ff04c41721dda74 for details.
+ifdef::env-github[]
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+= ECS Service
+
+image:https://img.shields.io/badge/maintained%20by-gruntwork.io-%235849a6.svg[link="https://gruntwork.io/?ref=repo_aws_ecs"]
+image:https://img.shields.io/badge/tf-%3E%3D1.1.0-blue.svg[Terraform version]
+
+This module creates an http://docs.aws.amazon.com/AmazonECS/latest/developerguide/ecs_services.html[Elastic Container
+Service (ECS) Service] that you can use to run one or more related, long-running Docker containers, such as a web
+service. An ECS service can automatically deploy multiple instances of your Docker containers across an ECS cluster (see
+the link:/modules/ecs-cluster[ecs-cluster module]), restart any failed Docker containers, route traffic across your
+containers using an optional Elastic Load Balancer (ELB), and optionally register the services to AWS Service Discovery
+Service.
+
+// tag::main-content[]
+
+image::/_docs/ecs-service-architecture.png?raw=true[ECS Service architecture]
+
+
+toc::[]
+
+
+
+
+== Features
+
+* Deploy and manage one or more docker containers as a logical unit
+* Deploy on Fargate or EC2 instances
+* Auto scaling and auto healing containers
+* Canary deployments
+* Service discovery through AWS Service Discovery Service
+* ELB (CLB, ALB, and NLB) support
+* VPC support
+* Verified deployments using the link:/modules/ecs-deploy-check-binaries[ECS deployment checker binary]
+
+
+
+
+== Learn
+
+NOTE: This repo is a part of https://gruntwork.io/infrastructure-as-code-library/[the Gruntwork Infrastructure as Code
+Library], a collection of reusable, battle-tested, production ready infrastructure code. If you've never used the Infrastructure as Code Library before, make sure to read https://gruntwork.io/guides/foundations/how-to-use-gruntwork-infrastructure-as-code-library/[How to use the Gruntwork Infrastructure as Code Library]!
+
+=== Core concepts
+
+* link:/core-concepts.md#what-is-elastic-container-service[What is Amazon ECS?]
+* link:/core-concepts.md#helpful-vocabulary[Helpful vocabulary for ECS]
+* link:/core-concepts.md#what-is-fargate[What is Fargate?]
+* link:/modules/ecs-service/core-concepts.md#what-is-an-ecs-service[What is an ECS Service?]
+* link:/modules/ecs-service/core-concepts.md#what-is-ecs-service-discovery[What is ECS Service Discovery?]
+* https://docs.aws.amazon.com/AmazonECS/latest/developerguide/Welcome.html[ECS Documentation]: Amazon's docs for ECS that
+  cover core concepts such as the different cluster hosting options, scheduling properties, Docker, security, and
+  monitoring.
+* https://training.gruntwork.io/p/a-crash-course-on-docker-packer[A crash course on Docker & Packer]: a series of
+  training videos that teach you how to use docker, including a section on ECS.
+
+
+=== Repo organization
+
+* link:/modules[modules]: the main implementation code for this repo, broken down into multiple standalone, orthogonal submodules.
+** link:/modules/ecs-cluster[modules/ecs-cluster]: use this module to provision an ECS cluster with ECS container
+   instances.
+** link:/modules/ecs-scripts[modules/ecs-scripts]: use the scripts in this module to configure private docker registries
+   and register ECS container instances to ECS clusters.
+** link:/modules/ecs-service[modules/ecs-service]: use this module to deploy one or more docker containers as a ECS
+   service, with options to use ELBs (CLB, ALB, or NLB), Service Discovery, or Fargate.
+** link:/modules/ecs-daemon-service[modules/ecs-daemon-service]: use this module to deploy one or more docker containers
+   that run on a regular schedule.
+** link:/modules/ecs-deploy[modules/ecs-deploy]: use the scripts in this module to run one or more docker
+   containers as a one time task on an ECS cluster.
+** link:/modules/ecs-deploy-check-binaries[modules/ecs-deploy-check-binaries]: use the python binary packages in this
+   module to check ECS service deployments to ensure that they are active and healthy.
+* link:/examples[examples]: This folder contains working examples of how to use the submodules.
+* link:/test[test]: Automated tests for the modules and examples.
+
+
+=== Gruntwork analysis
+
+* link:/core-concepts.md#ec2-vs-fargate-launch-types[EC2 vs Fargate launch types]: A detailed comparison between the two
+  available launch types for ECS, showing you the trade-offs between ECS container instances and Fargate.
+
+
+
+== Deploy
+
+=== Non-production deployment (quick start for learning)
+
+If you just want to try this repo out for experimenting and learning, check out the following resources:
+
+* link:/examples[examples folder]: The `examples` folder contains sample code optimized for learning, experimenting, and testing (but not production usage).
+
+=== Production deployment
+
+If you want to deploy this repo in production, check out the following resources:
+
+Production-ready sample code from the Reference Architecture:
+
+* ECS Cluster: examples for managing an ECS cluster with ECS container instances
+  * https://github.com/gruntwork-io/terraform-aws-service-catalog/blob/main/examples/for-production/infrastructure-live/prod/us-west-2/prod/services/ecs-cluster/terragrunt.hcl[app account configuration]
+  * https://github.com/gruntwork-io/terraform-aws-service-catalog/blob/main/examples/for-production/infrastructure-live/_envcommon/services/ecs-cluster.hcl[base configuration]
+
+* ECS Service with ALB: examples for managing ECS services load balanced by an ALB
+  * https://github.com/gruntwork-io/terraform-aws-service-catalog/blob/main/examples/for-production/infrastructure-live/prod/us-west-2/prod/services/ecs-sample-app-frontend/terragrunt.hcl[app account configuration]
+  * https://github.com/gruntwork-io/terraform-aws-service-catalog/blob/main/examples/for-production/infrastructure-live/_envcommon/services/ecs-sample-app-frontend.hcl[base configuration]
+
+
+== Manage
+
+=== Day-to-day operations
+
+* link:./core-concepts.md#how-do-i-use-fargate[How do I use Fargate?]
+* link:./core-concepts.md#how-do-i-associate-the-ecs-service-with-an-alb-or-nlb[How do I associate the ECS Service with an ALB or NLB?]
+* link:./core-concepts.md#how-do-i-setup-service-discovery[How do I setup Service Discovery?]
+* link:./core-concepts.md#how-do-you-add-additional-iam-policies-to-the-ecs-service[How do I add IAM policies to the ECS service?]
+* link:./core-concepts.md#how-do-you-scale-an-ecs-service[How do I scale an ECS service?]
+
+=== Major changes
+
+* link:/module/ecs-cluster/README.md#how-do-you-make-changes-to-the-ec-2-instances-in-the-cluster[How do you make changes to the EC2 instances in the cluster?]
+* link:./core-concepts.md#how-do-ecs-services-deploy-new-versions-of-containers[How do ECS Services deploy new versions of containers?]
+* link:./core-concepts.md#how-do-i-do-a-canary-deployment[How do I do a canary deployment?]
+
+
+== Support
+
+If you need help with this repo or anything else related to infrastructure or DevOps, Gruntwork offers https://gruntwork.io/support/[Commercial Support] via Slack, email, and phone/video. If you're already a Gruntwork customer, hop on Slack and ask away! If not, https://www.gruntwork.io/pricing/[subscribe now]. If you're not sure, feel free to email us at link:mailto:support@gruntwork.io[support@gruntwork.io].
+
+
+
+
+== Contributions
+
+Contributions to this repo are very welcome and appreciated! If you find a bug or want to add a new feature or even contribute an entirely new module, we are very happy to accept pull requests, provide feedback, and run your changes through our automated test suite.
+
+Please see https://gruntwork.io/guides/foundations/how-to-use-gruntwork-infrastructure-as-code-library/#contributing-to-the-gruntwork-infrastructure-as-code-library[Contributing to the Gruntwork Infrastructure as Code Library] for instructions.
+
+
+
+
+== License
+
+Please see link:/LICENSE.txt[LICENSE.txt] for details on how the code in this repo is licensed.

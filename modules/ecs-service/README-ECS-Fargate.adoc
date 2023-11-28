@@ -1,0 +1,28 @@
+:type: service
+:name: ECS Fargate Service
+:description: Deploy an ECS Fargate service with zero-downtime, rolling deployment, IAM Role, auto scaling, and more.
+:icon: /_docs/ecs-fargate-service-icon.png
+:category: docker-services
+:cloud: aws
+:tags: docker, orchestration, ecs, containers
+:license: gruntwork
+:built-with: terraform, python
+
+// AsciiDoc TOC settings
+:toc:
+:toc-placement!:
+:toc-title:
+
+= ECS Fargate Service
+
+image:https://img.shields.io/badge/maintained%20by-gruntwork.io-%235849a6.svg[link="https://gruntwork.io/?ref=repo_aws_ecs"]
+image:https://img.shields.io/badge/tf-%3E%3D1.1.0-blue.svg[Terraform version]
+
+This module creates an http://docs.aws.amazon.com/AmazonECS/latest/developerguide/ecs_services.html[Elastic Container
+Service (ECS) Service] on https://docs.aws.amazon.com/AmazonECS/latest/developerguide/AWS_Fargate.html[Fargate] that you
+can use to run one or more related, long-running Docker containers, such as a web service. An ECS service can
+automatically deploy multiple instances of your Docker containers, restart any failed Docker containers, route traffic
+across your containers using an optional Elastic Load Balancer (ELB), and optionally register the services to AWS
+Service Discovery Service.
+
+include::README.adoc[tags=main-content]

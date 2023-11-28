@@ -1,0 +1,42 @@
+[
+  {
+    "name": "datadog-agent",
+    "image": "datadog/agent:latest",
+    "cpu": ${cpu},
+    "memory": ${memory},
+    ${length(command) > 0 ? "\"command\": ${command}," : ""}
+    "essential": true,
+    "mountPoints": [
+      {
+        "containerPath": "/var/run/docker.sock",
+        "sourceVolume": "docker_sock",
+        "readOnly": true
+      },
+      {
+        "containerPath": "/host/sys/fs/cgroup",
+        "sourceVolume": "cgroup",
+        "readOnly": true
+      },
+      {
+        "containerPath": "/host/proc",
+        "sourceVolume": "proc",
+        "readOnly": true
+      },
+      {
+        "containerPath": "/volume-config-example",
+        "sourceVolume": "volumeConfigExample",
+        "readOnly": true
+      }
+    ],
+    "environment": [
+      {
+        "name": "DD_API_KEY",
+        "value": "${api_key}"
+      },
+      {
+    	  "name": "SD_BACKEND",
+        "value": "docker"
+      }
+    ]
+  }
+]

@@ -1,0 +1,10 @@
+[
+  {
+    "name": "${container_name}",
+    "image": "${image}:${version}",
+    "cpu": ${cpu},
+    "memory": ${memory},
+    "essential": true,
+    "command": ${command}
+  }
+]

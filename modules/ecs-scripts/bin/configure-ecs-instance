@@ -1,0 +1,275 @@
+#!/bin/bash
+#
+# This script configures an EC2 Instance so it registers in the specified ECS cluster and uses the specified
+# credentials for private Docker registry access. Note that this script can only be run as root on an EC2 instance with
+# the Amazon ECS-optimized AMI installed.
+
+set -e
+
+readonly ECS_CONFIG_FILE="/etc/ecs/ecs.config"
+
+readonly DOCKER_AUTH_TYPE_ECR="ecr"
+readonly DOCKER_AUTH_TYPE_HUB="docker-hub"
+readonly DOCKER_AUTH_TYPE_GITLAB="docker-gitlab"
+readonly DOCKER_AUTH_TYPE_OTHER="docker-other"
+readonly DOCKER_AUTH_TYPE_NONE="none"
+
+readonly DEFAULT_DOCKER_HUB_URL="https://index.docker.io/v1/"
+readonly DEFAULT_GITLAB_REGISTRY_URL="registry.gitlab.com"
+
+function print_usage {
+  echo
+  echo "Usage: configure-ecs-instance [OPTIONS]"
+  echo
+  echo "This script configures an EC2 Instance so it registers in the specified ECS cluster. Optionally, the script can allso configure the specified credentials for private Docker registry access (only necessary if NOT using ECR)."
+  echo
+  echo "Options:"
+  echo
+  echo -e "  --ecs-cluster-name\tThe name of the ECS cluster to register in. Required."
+  echo -e "  --docker-auth-type\tThe type of Docker registry to use. Must be one of: $DOCKER_AUTH_TYPE_HUB, $DOCKER_AUTH_TYPE_GITLAB, $DOCKER_AUTH_TYPE_OTHER, $DOCKER_AUTH_TYPE_NONE."
+  echo -e "                    \tIf other, you must specify the auth details with the environment variables DOCKER_REPO_URL, DOCKER_REPO_AUTH, and DOCKER_REPO_EMAIL. Optional."
+  echo -e "  --custom-config\t\tA custom ECS configuration you wish to set. Can be passed in multiple times for updating multiple keys. Each entry is expected to be passed in as KEY=VALUE."
+  echo -e "  --help\t\tShow this help text and exit."
+  echo
+  echo "Example:"
+  echo
+  echo "  configure-ecs-instance --ecs-cluster-name my-ecs-cluster"
+}
+
+function file_contains_text {
+  local -r text="$1"
+  local -r file="$2"
+  grep -q "$text" "$file"
+}
+
+function file_exists {
+  local -r file="$1"
+  [[ -f "$file" ]]
+}
+
+function append_text_in_file {
+  local -r text="$1"
+  local -r file="$2"
+
+  echo -e "$text" >> "$file"
+}
+
+function replace_text_in_file {
+  local -r original_text_regex="$1"
+  local -r replacement_text="$2"
+  local -r file="$3"
+
+  sed -i "s|$original_text_regex|$replacement_text|" "$file"
+}
+
+function replace_or_append_in_file {
+  local -r original_text_regex="$1"
+  local -r replacement_text="$2"
+  local -r file="$3"
+
+  if file_exists "$file" && file_contains_text "$original_text_regex" "$file"; then
+    replace_text_in_file "$original_text_regex" "$replacement_text" "$file"
+  else
+    append_text_in_file "$replacement_text" "$file"
+  fi
+}
+
+function configure_custom_setting {
+  local -r custom_config="$1"
+
+  local custom_config_key
+  local custom_config_value
+  if [[ "$custom_config" =~ ^([^=]+)=(.+)$ ]]; then
+    custom_config_key="${BASH_REMATCH[1]}"
+    custom_config_value="${BASH_REMATCH[2]}"
+  else
+    echo "ERROR: Could not parse custom config '$custom_config'"
+    exit 1
+  fi
+
+  echo "Configuring ECS setting $custom_config_key to $custom_config_value"
+  replace_or_append_in_file "$custom_config_key=.*" "$custom_config_key=$custom_config_value" "$ECS_CONFIG_FILE"
+}
+
+function configure_docker_auth {
+  local -r docker_auth_type="$1"
+  local -r ecr_aws_region="$2"
+
+  case "$docker_auth_type" in
+    "$DOCKER_AUTH_TYPE_ECR")
+      # Context: https://github.com/gruntwork-io/terraform-aws-ecs/issues/286
+      echo "Nothing to do for ECR auth. ecs-agent 1.16 and above authenticates to ECR automatically using the IAM role."
+      ;;
+    "$DOCKER_AUTH_TYPE_HUB")
+      local -r docker_repo_url="${DOCKER_REPO_URL:-$DEFAULT_DOCKER_HUB_URL}"
+      assert_env_var_not_empty "DOCKER_REPO_AUTH"
+      assert_env_var_not_empty "DOCKER_REPO_EMAIL"
+
+      configure_docker_auth_other "$docker_repo_url" "$DOCKER_REPO_AUTH" "$DOCKER_REPO_EMAIL"
+      ;;
+    "$DOCKER_AUTH_TYPE_GITLAB")
+      local -r docker_repo_url="${DOCKER_REPO_URL:-$DEFAULT_GITLAB_REGISTRY_URL}"
+      assert_env_var_not_empty "DOCKER_REPO_AUTH"
+
+      configure_docker_auth_other "$docker_repo_url" "$DOCKER_REPO_AUTH"
+      ;;
+    "$DOCKER_AUTH_TYPE_OTHER")
+      assert_env_var_not_empty "DOCKER_REPO_URL"
+      assert_env_var_not_empty "DOCKER_REPO_AUTH"
+
+      configure_docker_auth_other "$DOCKER_REPO_URL" "$DOCKER_REPO_AUTH" "$DOCKER_REPO_EMAIL"
+      ;;
+    "$DOCKER_AUTH_TYPE_NONE")
+      echo "--docker-auth-type set to $DOCKER_AUTH_TYPE_NONE, so will not configure any authentication for a private Docker repo."
+      ;;
+    *)
+      echo "ERROR: Unrecognized Docker auth type: $docker_auth_type"
+      exit 1
+  esac
+}
+
+function configure_docker_auth_other {
+  local -r docker_repo_url="$1"
+  local -r docker_repo_auth="$2"
+  local -r docker_repo_email="$3"
+
+  local email_attr
+  if [[ -n "$docker_repo_email" ]]; then
+    email_attr=",\"email\":\"$docker_repo_email\""
+  fi
+
+  echo "Configuring instance with auth details for Docker repo $docker_repo_url"
+  replace_or_append_in_file "ECS_ENGINE_AUTH_TYPE=.*" "ECS_ENGINE_AUTH_TYPE=dockercfg" "$ECS_CONFIG_FILE"
+  replace_or_append_in_file "ECS_ENGINE_AUTH_DATA=.*" "ECS_ENGINE_AUTH_DATA={\"$docker_repo_url\":{\"auth\":\"$docker_repo_auth\"$email_attr}}" "$ECS_CONFIG_FILE"
+}
+
+# http://askubuntu.com/a/606149
+function run_cmd_as_user {
+  local -r command="$1"
+  local -r user="$2"
+  su - "$user" -c "$command"
+}
+
+function configure_ecs_cluster {
+  local -r ecs_cluster_name="$1"
+
+  echo "Configuring instance to register in the ECS cluster $ecs_cluster_name"
+  replace_or_append_in_file "ECS_CLUSTER=.*" "ECS_CLUSTER=$ecs_cluster_name" "$ECS_CONFIG_FILE"
+}
+
+function assert_is_installed {
+  local -r name="$1"
+
+  if [[ ! $(command -v "$name") ]]; then
+    echo "ERROR: The binary '$name' is required by this script but is not installed or in the system's PATH."
+    exit 1
+  fi
+}
+
+function assert_uid_is_root_or_sudo {
+  if [[ $EUID != 0 ]]; then
+    echo "ERROR: This script should be run using sudo or as the root user"
+    exit 1
+  fi
+}
+
+function assert_env_var_not_empty {
+  local -r var_name="$1"
+  local -r var_value="${!var_name}"
+
+  if [[ -z "$var_value" ]]; then
+    echo "ERROR: Required environment $var_name not set."
+    exit 1
+  fi
+}
+
+function assert_not_empty {
+  local -r arg_name="$1"
+  local -r arg_value="$2"
+
+  if [[ -z "$arg_value" ]]; then
+    echo "ERROR: The value for '$arg_name' cannot be empty"
+    print_usage
+    exit 1
+  fi
+}
+
+function assert_value_in_set {
+  local -r value_name="$1"
+  local -r value="$2"
+  shift 2
+  local -ra set=("$@")
+  local item=""
+
+  for item in "${set[@]}"; do
+    if [[ "$item" == "$value" ]]; then
+      return
+    fi
+  done
+
+  echo "ERROR: Value $value is not a valid value for $value_name. It must be one of: ${set[*]}"
+  exit 1
+}
+
+function configure_ecs_instance {
+  local ecs_cluster_name
+  local docker_auth_type="$DOCKER_AUTH_TYPE_NONE"
+  local ecr_aws_region
+  local -a custom_config=()
+
+  while [[ $# -gt 0 ]]; do
+    local key="$1"
+
+    case "$key" in
+      --ecs-cluster-name)
+        ecs_cluster_name="$2"
+        shift
+        ;;
+      --docker-auth-type)
+        docker_auth_type="$2"
+        shift
+        ;;
+      # We only keep this param around for backwards compatibility. This script used to have to manually authenticate
+      # to ECR, but that's no longer necessary, as the ECS agent does it automatically via IAM role. However, we keep
+      # the params around so users don't have to change anything in their code.
+      --ecr-aws-region)
+        ecr_aws_region="$2"
+        shift
+        ;;
+      --custom-config)
+        custom_config+=("$2")
+        shift
+        ;;
+      --help)
+        print_usage
+        exit
+        ;;
+      *)
+        echo "ERROR: Unrecognized argument: $key"
+        print_usage
+        exit 1
+        ;;
+    esac
+
+    shift
+  done
+
+  assert_uid_is_root_or_sudo
+
+  assert_not_empty "--ecs-cluster-name" "$ecs_cluster_name"
+
+  if [[ -n "$docker_auth_type" ]]; then
+    # Note that we allow DOCKER_AUTH_TYPE_ECR as a valid value for backwards compatibility reasons.
+    assert_value_in_set "--docker-auth-type" "$docker_auth_type" "$DOCKER_AUTH_TYPE_ECR" "$DOCKER_AUTH_TYPE_HUB" "$DOCKER_AUTH_TYPE_GITLAB" "$DOCKER_AUTH_TYPE_OTHER" "$DOCKER_AUTH_TYPE_NONE"
+  fi
+
+  configure_ecs_cluster "$ecs_cluster_name"
+  configure_docker_auth "$docker_auth_type" "$ecr_aws_region"
+
+  for (( i=0; i<${#custom_config[@]}; i++ ));
+  do
+    configure_custom_setting "${custom_config[$i]}"
+  done
+}
+
+configure_ecs_instance "$@"

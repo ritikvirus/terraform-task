@@ -1,0 +1,171 @@
+#!/bin/bash
+
+set -e
+
+readonly EXIT_CODE_NO_EXIT_CODE_FOUND=2
+
+function print_usage {
+  echo
+  echo "Usage: check-ecs-tasks [OPTIONS] -- COMMAND"
+  echo
+  echo "Checks tasks in a specified cluster for specific exit codes"
+  echo
+  echo
+  echo "Required arguments:"
+  echo
+  echo -e "  --cluster\tThe short name of the ECS Cluster in which to look for ecs tasks."
+  echo -e "  --region\tThe AWS region in which to check."
+  echo -e "  --expected-task-count\t The number of tasks expected to exist in the cluster. "
+  echo
+  echo "Example:"
+  echo
+  echo "  check-ecs-tasks --cluster ecs-stage --region us-west-2 --expected-num-tasks 2"
+}
+
+# Log to stderr so we can use stdout to return data from functions
+function log {
+  >&2 echo -e "$@"
+}
+
+function assert_not_empty {
+  local -r arg_name="$1"
+  local -r arg_value="$2"
+
+  if [[ -z "$arg_value" ]]; then
+    log "ERROR: The value for '$arg_name' cannot be empty"
+    print_usage
+    exit 1
+  fi
+}
+
+function assert_is_installed {
+  local -r name="$1"
+
+  if [[ ! $(command -v "$name") ]]; then
+    log "ERROR: The binary '$name' is required by this script but is not installed or in the system's PATH."
+    exit 1
+  fi
+}
+
+function get_tasks {
+  local -r cluster="$1"
+  local -r region="$2"
+  local -r expected_task_count="$3"
+
+  local -a args=( ecs list-tasks --region "$region" --cluster "$cluster" --desired-status "STOPPED" --output json )
+  log "Looking up tasks in ECS Cluster $cluster in $region"
+
+  local output
+  output=$(aws "${args[@]}")
+
+  taskArns=$(echo "$output" | jq -r '.taskArns')
+  actual_task_count=$(echo $taskArns | jq '. | length')
+
+  if [[ -z $expected_task_count ]]; then
+    log "No expected number of tasks provided, skipping check."
+  else
+    if [[  $actual_task_count -ne $expected_task_count ]]; then
+      log "ERROR: Number of tasks does not match expected number of tasks. Expected $expected_task_count, found $actual_task_count. Exiting."
+      exit 1
+    fi
+  fi
+
+  echo $taskArns
+}
+
+function check_task_exit_codes {
+  local -r cluster="$1"
+  local -r region="$2"
+  local -r tasksArray="$3"
+
+  tasks=$(echo "$tasksArray" | jq -r '.[]')
+
+  log "Checking task exit codes"
+
+  if [[ -z "$tasks" ]]; then
+    log "ERROR: No tasks found in STOPPED state for selected cluster and region. Exiting."
+    exit 1
+  else
+    for taskArn in $tasks; do
+      local -a args=( ecs describe-tasks --region "$region" --cluster "$cluster" --tasks "$taskArn" --output json )
+      local output
+      local exitStatus
+
+      output=$(aws "${args[@]}")
+
+      exitStatus=$(get_exit_code "$output")
+
+      if [[ "$exitStatus" -ne 0 ]]; then
+        log "ERROR: Found invalid exit code. Exiting."
+        exit 1
+      fi
+    done
+  fi
+  log "Success"
+  echo 0
+} 
+
+function get_exit_code {
+  local -r describe_tasks_output="$1"
+  local exit_code
+
+  exit_code=$(echo "$describe_tasks_output" | jq -r '.tasks[0].containers[0].exitCode')
+
+  if [[ "$exit_code" == "null" ]]; then
+    log "ERROR: Could not find exit code for first container in the ECS Task. This most likely means the ECS Task was not able to launch the container at all. Returning exit code $EXIT_CODE_NO_EXIT_CODE_FOUND."
+    echo "$EXIT_CODE_NO_EXIT_CODE_FOUND"
+  else
+    log "Returning the exit code from the first container in the ECS Task: $exit_code."
+    echo "$exit_code"
+  fi
+}
+
+function check_ecs_tasks {
+  local cluster
+  local region
+  local expected_task_count
+
+  while [[ $# -gt 0 ]]; do
+    local key="$1"
+
+    case "$key" in
+      --cluster)
+        cluster="$2"
+        shift 2
+        ;;
+      --region)
+        region="$2"
+        shift 2
+        ;;
+      --expected-task-count)
+        expected_task_count="$2"
+        shift 2
+        ;;
+      --help)
+        print_usage
+        exit
+        ;;
+      *)
+        echo "ERROR: Unrecognized argument: $key"
+        print_usage
+        exit 1
+        ;;
+    esac
+  done
+
+  assert_not_empty "--cluster" "$cluster"
+  assert_not_empty "--region" "$region"
+
+  assert_is_installed "aws"
+  assert_is_installed "jq"
+
+  local tasks
+
+  tasks=$(get_tasks "$cluster" "$region" "$expected_task_count")
+  exit_code_resp=$(check_task_exit_codes "$cluster" "$region" "$tasks")
+
+  exit $exit_code_resp
+}
+
+check_ecs_tasks "$@"
+

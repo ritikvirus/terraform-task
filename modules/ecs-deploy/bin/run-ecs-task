@@ -1,0 +1,229 @@
+#!/bin/bash
+
+set -e
+
+readonly WAIT_INDEFINITELY_TIMEOUT=0
+readonly SLEEP_BETWEEN_RETRIES=10
+
+readonly EXIT_CODETIMEOUT_EXCEEDED=2
+readonly EXIT_CODE_NO_EXIT_CODE_FOUND=3
+
+function print_usage {
+  echo
+  echo "Usage: run-ecs-task [OPTIONS] -- COMMAND"
+  echo
+  echo "Run a single ECS Task, wait for it to exit, and return the exit code of the first container in that Task. This is useful in scripts (e.g. an automated deployment script) for running short-lived ECS Tasks (e.g., an ECS Task that takes a backup of your data or runs a schema migration) and ensuring those ECS Tasks complete successfully."
+  echo
+  echo "If COMMAND is provided, then this will run the specified command in the ECS task. Otherwise, the configured command in the task definition is run."
+  echo
+  echo "Required arguments:"
+  echo
+  echo -e "  --task\tThe <family:revision> or full ARN of the ECS Task Definition to run."
+  echo -e "  --cluster\tThe short name or full ARN of the ECS Cluster in which to run the ECS Task."
+  echo -e "  --region\tThe AWS region in which to run the ECS Task."
+  echo -e "  --timeout\tThe maximum amount of time, in seconds, to wait for the Task to exit. Set to $WAIT_INDEFINITELY_TIMEOUT to wait indefinitely."
+  echo -e "  --container\tThe name of the container the command applies to. Required if specifying a command."
+  echo
+  echo "Example:"
+  echo
+  echo "  run-ecs-task --task db-backup:3 --cluster ecs-stage --region us-west-2 --timeout 600"
+  echo "  run-ecs-task --task db-backup:3 --cluster ecs-stage --region us-west-2 --timeout 600 --container main -- /opt/db-backup/backup.sh"
+}
+
+# Log to stderr so we can use stdout to return data from functions
+function log {
+  >&2 echo -e "$@"
+}
+
+function assert_not_empty {
+  local -r arg_name="$1"
+  local -r arg_value="$2"
+
+  if [[ -z "$arg_value" ]]; then
+    log "ERROR: The value for '$arg_name' cannot be empty"
+    print_usage
+    exit 1
+  fi
+}
+
+function assert_is_installed {
+  local -r name="$1"
+
+  if [[ ! $(command -v "$name") ]]; then
+    log "ERROR: The binary '$name' is required by this script but is not installed or in the system's PATH."
+    exit 1
+  fi
+}
+
+function run_task {
+  local -r task="$1"
+  local -r cluster="$2"
+  local -r region="$3"
+  local -r container="$4"
+  shift 4
+
+  local -a container_command=("$@")
+
+  local container_overrides
+  if [[ ${#container_command[@]} -gt 0 ]]; then
+    container_overrides="{\"containerOverrides\": [{\"name\": \"$container\", \"command\": []}]}"
+    for cmd in "${container_command[@]}"
+    do
+      container_overrides="$(echo "$container_overrides" | jq -rM ".containerOverrides[0].command |= .+ [\"$cmd\"]")"
+    done
+  fi
+
+  local -a args=( ecs run-task --region "$region" --task-definition "$task" --cluster "$cluster" --output json )
+  log "Running ECS Task Definition $task in ECS Cluster $cluster in $region"
+  if [[ -n "$container_overrides" ]]; then
+    log "With container overrides: $container_overrides"
+    args+=(--overrides "$container_overrides")
+  fi
+
+
+  local output
+  output=$(aws "${args[@]}")
+
+  local -r exit_code="$?"
+  if [[ "$exit_code" -ne 0 ]]; then
+    log "ERROR launching ECS Task $task. AWS command exited with code $exit_code. See log output above for details."
+    exit "$exit_code"
+  fi
+
+  local task_arn
+  task_arn=$(echo "$output" | jq -r '.tasks[0].taskArn')
+  if [[ -z "$task_arn" ]]; then
+    log "ERROR: unable to extract task ARN from AWS response: $output"
+    exit 1
+  fi
+
+  log "ECS Task started with ARN $task_arn"
+  echo "$task_arn"
+}
+
+function get_exit_code {
+  local -r describe_tasks_output="$1"
+  local exit_code
+
+  exit_code=$(echo "$describe_tasks_output" | jq -r '.tasks[0].containers[0].exitCode')
+
+  if [[ "$exit_code" == "null" ]]; then
+    log "ERROR: Could not find exit code for first container in the ECS Task. This most likely means the ECS Task was not able to launch the container at all. Returning exit code $EXIT_CODE_NO_EXIT_CODE_FOUND."
+    echo "$EXIT_CODE_NO_EXIT_CODE_FOUND"
+  else
+    log "Returning the exit code from the first container in the ECS Task: $exit_code."
+    echo "$exit_code"
+  fi
+}
+
+function wait_for_task_to_exit {
+  local -r task_arn="$1"
+  local -r cluster="$2"
+  local -r region="$3"
+  local -r timeout="$4"
+
+  # This is a built-in Bash variable. We can reset it to zero here and each time we check it down below, it will report
+  # the number of elapsed seconds since this reset. For more info, see: https://stackoverflow.com/a/8903280/483528
+  SECONDS=0
+  while [[ "$SECONDS" -lt "$timeout" ]]; do
+    local output
+    local last_status
+
+    log "Checking status of ECS Task $task_arn in ECS Cluster $cluster in $region"
+    output=$(aws ecs describe-tasks --region "$region" --cluster "$cluster" --tasks "$task_arn" --output json)
+
+    local aws_exit_code="$?"
+    if [[ "$aws_exit_code" -ne 0 ]]; then
+      log "ERROR checking status of ECS Task $task_arn. AWS command exited with code $aws_exit_code. See log output above for details."
+      exit "$aws_exit_code"
+    fi
+
+    last_status=$(echo "$output" | jq -r '.tasks[0].lastStatus')
+    log "ECS Task $task_arn is in status $last_status."
+
+    if [[ "$last_status" == "STOPPED" ]]; then
+      local task_exit_code
+      task_exit_code=$(get_exit_code "$output")
+      echo "$task_exit_code"
+      return
+    else
+      log "Sleeping for $SLEEP_BETWEEN_RETRIES seconds and will check again."
+      sleep "$SLEEP_BETWEEN_RETRIES"
+    fi
+  done
+
+  log "ERROR: Exceeded time out of $timeout seconds and ECS Task is still running. Returning exit code $EXIT_CODETIMEOUT_EXCEEDED."
+  echo "$EXIT_CODETIMEOUT_EXCEEDED"
+}
+
+function run_ecs_task {
+  local task
+  local cluster
+  local region
+  local timeout
+  local container
+  local -a container_command
+
+  while [[ $# -gt 0 ]]; do
+    local key="$1"
+
+    case "$key" in
+      --task)
+        task="$2"
+        shift 2
+        ;;
+      --cluster)
+        cluster="$2"
+        shift 2
+        ;;
+      --region)
+        region="$2"
+        shift 2
+        ;;
+      --timeout)
+        timeout="$2"
+        shift 2
+        ;;
+      --container)
+        container="$2"
+        shift 2
+        ;;
+      --)
+        # Consume the -- and then assign the remaining args. Then, consume them all.
+        shift
+        container_command=("$@")
+        shift "$#"
+        ;;
+      --help)
+        print_usage
+        exit
+        ;;
+      *)
+        echo "ERROR: Unrecognized argument: $key"
+        print_usage
+        exit 1
+        ;;
+    esac
+  done
+
+  assert_not_empty "--task" "$task"
+  assert_not_empty "--cluster" "$cluster"
+  assert_not_empty "--region" "$region"
+  assert_not_empty "--timeout" "$timeout"
+
+  if [[ ${#container_command[@]} -gt 0 ]]; then
+    assert_not_empty "--container" "$container"
+  fi
+
+  assert_is_installed "aws"
+  assert_is_installed "jq"
+
+  local task_arn
+  local exit_code
+  task_arn=$(run_task "$task" "$cluster" "$region" "$container" "${container_command[@]}")
+  exit_code=$(wait_for_task_to_exit "$task_arn" "$cluster" "$region" "$timeout")
+
+  exit "$exit_code"
+}
+
+run_ecs_task "$@"

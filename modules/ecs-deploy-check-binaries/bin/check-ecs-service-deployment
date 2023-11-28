@@ -1,0 +1,22 @@
+#!/usr/bin/env python3
+"""
+Wrapper script to execute entrypoint using the PEX binary to load requirements prior to execution.
+"""
+from __future__ import print_function
+import os
+import sys
+
+
+BINARY_SOURCE_DIR = os.path.dirname(os.path.realpath(__file__))
+
+
+def main():
+    pex = os.path.join(BINARY_SOURCE_DIR, "check_ecs_service_deployment_env.pex")
+    entrypoint = os.path.normpath(os.path.join(BINARY_SOURCE_DIR, "entrypoint.py"))
+
+    # Replace current process, since we won't be needing this process after this
+    os.execlp(sys.executable, sys.executable, pex, entrypoint, *sys.argv[1:])
+
+
+if __name__ == "__main__":
+    main()
